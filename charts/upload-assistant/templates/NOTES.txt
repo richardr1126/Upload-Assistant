@@ -1,0 +1,49 @@
+Upload-Assistant Web UI is deployed.
+
+1) Accessing the Web UI
+
+{{- if .Values.ingress.enabled }}
+Ingress is enabled. Visit:
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+
+{{- else if contains "LoadBalancer" .Values.service.type }}
+Service type is LoadBalancer:
+  kubectl -n {{ .Release.Namespace }} get svc {{ include "upload-assistant.fullname" . }} -w
+
+When an external IP/hostname is assigned:
+  export EXTERNAL=$(kubectl -n {{ .Release.Namespace }} get svc {{ include "upload-assistant.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}')
+  echo "http://$EXTERNAL:{{ .Values.service.port }}"
+
+{{- else if contains "NodePort" .Values.service.type }}
+Service type is NodePort:
+  export NODE_PORT=$(kubectl -n {{ .Release.Namespace }} get svc {{ include "upload-assistant.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}')
+  export NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  echo "http://$NODE_IP:$NODE_PORT"
+
+{{- else }}
+Service type is ClusterIP (default):
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "upload-assistant.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  # then visit: http://127.0.0.1:{{ .Values.service.port }}
+{{- end }}
+
+2) Configuration (`config.py`)
+
+- Upload-Assistant reads it from `/Upload-Assistant/data/config.py`.
+{{- if and .Values.config.enabled .Values.config.existingSecret }}
+- This release expects a Secret named `{{ .Values.config.existingSecret }}` with key `{{ .Values.config.key }}`:
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.config.existingSecret }} --from-file={{ .Values.config.key }}=/path/to/config.py
+{{- else if and .Values.config.enabled .Values.config.existingConfigMap }}
+- This release expects a ConfigMap named `{{ .Values.config.existingConfigMap }}` with key `{{ .Values.config.key }}`.
+{{- else if .Values.config.enabled }}
+- This release will create the config from `config.configPy` (see chart README).
+{{- end }}
+
+{{- if or .Values.ingress.enabled (contains "LoadBalancer" .Values.service.type) (contains "NodePort" .Values.service.type) }}
+3) Security
+
+- If exposed beyond localhost/LAN, strongly consider setting `UA_WEBUI_USERNAME` and `UA_WEBUI_PASSWORD` via `env` or `envFrom`.
+{{- end }}

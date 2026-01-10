@@ -1,0 +1,412 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "upload-assistant.fullname" . }}
+  labels:
+    {{- include "upload-assistant.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "upload-assistant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "upload-assistant.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "upload-assistant.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.permissionsInit.enabled (and .Values.config.enabled .Values.config.copyToVolume) }}
+      initContainers:
+      {{- if and .Values.config.enabled .Values.config.copyToVolume }}
+        - name: config-init
+          image: {{ (printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion)) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+
+              # Seed the data volume with bundled defaults (e.g. tags.json, templates/)
+              # without overwriting anything the user already has persisted.
+              seed_src="/Upload-Assistant/data"
+              seed_dst="/ua-data"
+              mkdir -p "$seed_dst"
+              for item in "$seed_src"/*; do
+                [ -e "$item" ] || continue
+                name="$(basename "$item")"
+                case "$name" in
+                  "config.py") continue ;;
+                  "__pycache__") continue ;;
+                esac
+                if [ ! -e "$seed_dst/$name" ]; then
+                  cp -a "$item" "$seed_dst/"
+                fi
+              done
+
+              src="/config-template/{{ .Values.config.key }}"
+              dst="/ua-data{{- if hasPrefix .Values.persistence.uaData.mountPath .Values.config.mountPath -}}{{ trimPrefix .Values.persistence.uaData.mountPath .Values.config.mountPath }}{{- else -}}/{{ .Values.config.key }}{{- end }}"
+              mkdir -p "$(dirname "$dst")"
+              overwrite="{{ .Values.config.overwrite }}"
+              if [ "$overwrite" = "true" ]; then
+                cp -f "$src" "$dst"
+              else
+                if [ ! -f "$dst" ]; then
+                  cp "$src" "$dst"
+                fi
+              fi
+              chown {{ .Values.securityContext.runAsUser | default 0 }}:{{ .Values.securityContext.runAsGroup | default 0 }} "$dst" || true
+          volumeMounts:
+            - name: ua-data
+              mountPath: /ua-data
+              {{- with .Values.persistence.uaData.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            - name: config-template
+              mountPath: /config-template
+              readOnly: true
+      {{- end }}
+        {{- if .Values.permissionsInit.enabled }}
+        - name: permissions-init
+          image: {{ .Values.permissionsInit.image | quote }}
+          imagePullPolicy: {{ .Values.permissionsInit.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              uid={{ .Values.securityContext.runAsUser | default 0 }}
+              gid={{ .Values.securityContext.runAsGroup | default (.Values.podSecurityContext.fsGroup | default 0) }}
+              paths="{{ .Values.persistence.uaData.mountPath }} {{ .Values.persistence.tmp.mountPath }}{{- if and .Values.permissionsInit.includeFilesMount .Values.persistence.files.enabled }} {{ .Values.persistence.files.mountPath }}{{- end }}{{- if and .Values.permissionsInit.includeTorrentStorageMount .Values.persistence.torrentStorage.enabled }} {{ .Values.persistence.torrentStorage.mountPath }}{{- end }}{{- range .Values.permissionsInit.extraPaths }} {{ . }}{{- end }}"
+              for d in $paths; do
+                mkdir -p "$d"
+                chown -R "$uid:$gid" "$d" || true
+              done
+          volumeMounts:
+            - name: ua-data
+              mountPath: {{ .Values.persistence.uaData.mountPath }}
+              {{- with .Values.persistence.uaData.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            - name: tmp
+              mountPath: {{ .Values.persistence.tmp.mountPath }}
+              {{- with .Values.persistence.tmp.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- if and .Values.permissionsInit.includeFilesMount .Values.persistence.files.enabled }}
+            - name: files
+              mountPath: {{ .Values.persistence.files.mountPath }}
+              {{- with .Values.persistence.files.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if and .Values.permissionsInit.includeTorrentStorageMount .Values.persistence.torrentStorage.enabled }}
+            - name: torrent-storage
+              mountPath: {{ .Values.persistence.torrentStorage.mountPath }}
+              {{- with .Values.persistence.torrentStorage.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- end }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- $env := .Values.env -}}
+          {{- if $env }}
+            {{- if not (kindIs "map" $env) }}
+              {{- fail "values.env must be a map of env var names to values (or {value,valueFrom}); list-style env is not supported" }}
+            {{- end }}
+          env:
+            {{- range $name := (keys $env | sortAlpha) }}
+            - name: {{ $name | quote }}
+              {{- $entry := index $env $name }}
+              {{- if kindIs "map" $entry }}
+                {{- if hasKey $entry "valueFrom" }}
+              valueFrom:
+                {{- toYaml (get $entry "valueFrom") | nindent 16 }}
+                {{- else if hasKey $entry "value" }}
+              value: {{ get $entry "value" | quote }}
+                {{- else }}
+              value: {{ $entry | toJson | quote }}
+                {{- end }}
+              {{- else }}
+              value: {{ printf "%v" $entry | quote }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: ua-data
+              mountPath: {{ .Values.persistence.uaData.mountPath }}
+              {{- with .Values.persistence.uaData.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            - name: tmp
+              mountPath: {{ .Values.persistence.tmp.mountPath }}
+              {{- with .Values.persistence.tmp.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- if .Values.persistence.files.enabled }}
+            - name: files
+              mountPath: {{ .Values.persistence.files.mountPath }}
+              {{- with .Values.persistence.files.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+              {{- if .Values.persistence.files.readOnly }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+            {{- if .Values.persistence.torrentStorage.enabled }}
+            - name: torrent-storage
+              mountPath: {{ .Values.persistence.torrentStorage.mountPath }}
+              {{- with .Values.persistence.torrentStorage.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+              {{- if .Values.persistence.torrentStorage.readOnly }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+            {{- if and .Values.config.enabled (not .Values.config.copyToVolume) }}
+            - name: config-template
+              mountPath: {{ .Values.config.mountPath }}
+              subPath: {{ .Values.config.key }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if and .Values.vpn.enabled (eq (.Values.vpn.type | default "gluetun") "gluetun") }}
+        - name: gluetun
+          image: "{{ .Values.vpn.gluetun.image.repository }}:{{ .Values.vpn.gluetun.image.tag }}"
+          imagePullPolicy: {{ .Values.vpn.gluetun.image.pullPolicy }}
+          {{- with .Values.vpn.gluetun.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- $gluetunEnv := .Values.vpn.gluetun.env -}}
+          {{- if $gluetunEnv }}
+          env:
+            {{- if kindIs "slice" $gluetunEnv }}
+            {{- toYaml $gluetunEnv | nindent 12 }}
+            {{- else if kindIs "map" $gluetunEnv }}
+            {{- range $name := (keys $gluetunEnv | sortAlpha) }}
+            - name: {{ $name | quote }}
+              {{- $entry := index $gluetunEnv $name }}
+              {{- if kindIs "map" $entry }}
+                {{- if hasKey $entry "valueFrom" }}
+              valueFrom:
+                {{- toYaml (get $entry "valueFrom") | nindent 16 }}
+                {{- else if hasKey $entry "value" }}
+              value: {{ get $entry "value" | quote }}
+                {{- else }}
+              value: {{ $entry | toJson | quote }}
+                {{- end }}
+              {{- else }}
+              value: {{ printf "%v" $entry | quote }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.vpn.gluetun.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.vpn.gluetun.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or (and .Values.vpn.gluetun.tunDevice.enabled .Values.vpn.gluetun.tunDevice.mountPath) .Values.vpn.gluetun.volumeMounts }}
+          volumeMounts:
+            {{- if and .Values.vpn.gluetun.tunDevice.enabled .Values.vpn.gluetun.tunDevice.mountPath }}
+            - name: gluetun-tun
+              mountPath: {{ .Values.vpn.gluetun.tunDevice.mountPath | quote }}
+            {{- end }}
+            {{- with .Values.vpn.gluetun.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      volumes:
+        - name: ua-data
+          {{- if .Values.persistence.uaData.enabled }}
+          {{- if eq .Values.persistence.uaData.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.uaData.existingClaim | default (printf "%s-ua-data" (include "upload-assistant.fullname" .)) }}
+          {{- else if eq .Values.persistence.uaData.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.persistence.uaData.hostPath.path | quote }}
+            {{- with .Values.persistence.uaData.hostPath.type }}
+            type: {{ . | quote }}
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          {{- if .Values.persistence.tmp.enabled }}
+          {{- if eq .Values.persistence.tmp.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.tmp.existingClaim | default (printf "%s-tmp" (include "upload-assistant.fullname" .)) }}
+          {{- else if eq .Values.persistence.tmp.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.persistence.tmp.hostPath.path | quote }}
+            {{- with .Values.persistence.tmp.hostPath.type }}
+            type: {{ . | quote }}
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.persistence.files.enabled }}
+        - name: files
+          {{- if eq .Values.persistence.files.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.files.existingClaim | default (printf "%s-files" (include "upload-assistant.fullname" .)) }}
+          {{- else if eq .Values.persistence.files.type "nfs" }}
+          nfs:
+            server: {{ .Values.persistence.files.nfs.server | quote }}
+            path: {{ .Values.persistence.files.nfs.path | quote }}
+          {{- else if eq .Values.persistence.files.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.persistence.files.hostPath.path | quote }}
+            {{- with .Values.persistence.files.hostPath.type }}
+            type: {{ . | quote }}
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if .Values.persistence.torrentStorage.enabled }}
+        - name: torrent-storage
+          {{- if eq .Values.persistence.torrentStorage.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.torrentStorage.existingClaim | default (printf "%s-torrent-storage" (include "upload-assistant.fullname" .)) }}
+          {{- else if eq .Values.persistence.torrentStorage.type "nfs" }}
+          nfs:
+            server: {{ .Values.persistence.torrentStorage.nfs.server | quote }}
+            path: {{ .Values.persistence.torrentStorage.nfs.path | quote }}
+          {{- else if eq .Values.persistence.torrentStorage.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.persistence.torrentStorage.hostPath.path | quote }}
+            {{- with .Values.persistence.torrentStorage.hostPath.type }}
+            type: {{ . | quote }}
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- if .Values.config.enabled }}
+        - name: config-template
+          {{- if .Values.config.existingSecret }}
+          secret:
+            secretName: {{ .Values.config.existingSecret }}
+            items:
+              - key: {{ .Values.config.key }}
+                path: {{ .Values.config.key }}
+          {{- else if .Values.config.existingConfigMap }}
+          configMap:
+            name: {{ .Values.config.existingConfigMap }}
+            items:
+              - key: {{ .Values.config.key }}
+                path: {{ .Values.config.key }}
+          {{- else if eq .Values.config.kind "configMap" }}
+          configMap:
+            name: {{ printf "%s-config" (include "upload-assistant.fullname" .) }}
+            items:
+              - key: {{ .Values.config.key }}
+                path: {{ .Values.config.key }}
+          {{- else }}
+          secret:
+            secretName: {{ printf "%s-config" (include "upload-assistant.fullname" .) }}
+            items:
+              - key: {{ .Values.config.key }}
+                path: {{ .Values.config.key }}
+          {{- end }}
+        {{- end }}
+      {{- if and .Values.vpn.enabled (eq (.Values.vpn.type | default "gluetun") "gluetun") .Values.vpn.gluetun.tunDevice.enabled }}
+        - name: gluetun-tun
+          hostPath:
+            path: {{ .Values.vpn.gluetun.tunDevice.hostPath | quote }}
+            {{- with .Values.vpn.gluetun.tunDevice.type }}
+            type: {{ . | quote }}
+            {{- end }}
+      {{- end }}
+      {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
