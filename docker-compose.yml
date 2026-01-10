@@ -3,6 +3,9 @@ services:
     image: ghcr.io/audionut/upload-assistant:master-webui #you can use the version number with -webui appended, for example :v6.3.1-webui
     container_name: UA
     restart: unless-stopped
+    # The official image runs as non-root by default (UID:GID 1000:1000).
+    # Ensure any bind-mounted host paths are writable by 1000:1000 (or adjust `user:` + host permissions).
+    # user: "1000:1000"
     networks:
       - yournetwork #change to the network with ur torrent instance
     ports: 
@@ -24,7 +27,7 @@ services:
     command: -c "source /venv/bin/activate && python /Upload-Assistant/web_ui/server.py & tail -f /dev/null"
     volumes:
       - /path/to/torrents/:/data/torrents/:rw #map this to qbit download location, map exactly as qbittorent template on both sides.
-      - /mnt/user/appdata/Upload-Assistant/data/config.py:/Upload-Assistant/data/config.py:rw #map this to config.py exactly
+      - /mnt/user/appdata/Upload-Assistant/data/:/Upload-Assistant/data:rw #must contain config.py (and is where UA stores cookies/templates/etc)
       - /mnt/user/appdata/qBittorrent/data/BT_backup/:/torrent_storage_dir:rw #map this to your qbittorrent bt_backup
       - /mnt/user/appdata/Upload-Assistant/tmp/:/Upload-Assistant/tmp:rw #map this to your /tmp folder.
 networks:

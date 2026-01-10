@@ -51,18 +51,31 @@ RUN python3 bin/download_mkbrr_for_docker.py
 # Copy the rest of the application (including web_ui)
 COPY . .
 
-# Ensure mkbrr is executable
-RUN find bin/mkbrr -type f -name "mkbrr" -exec chmod +x {} \;
-
-# Create tmp directory with appropriate permissions
-RUN mkdir -p /Upload-Assistant/tmp && chmod 777 /Upload-Assistant/tmp
+# Set permissions/ownership for non-root runtime (1000:1000)
+RUN set -eux; \
+    # Ensure mkbrr is executable
+    find bin/mkbrr -type f -name "mkbrr" -exec chmod +x {} \;; \
+    chmod +x docker-entrypoint.sh; \
+    \
+    # Create tmp directory and ensure UA can chmod(0700) it at runtime
+    mkdir -p /Upload-Assistant/tmp; \
+    chown 1000:1000 /Upload-Assistant/tmp; \
+    chmod 700 /Upload-Assistant/tmp; \
+    \
+    # Ensure UA can execute bundled binaries even when they are chmod(0700)
+    chown -R 1000:1000 /Upload-Assistant/bin/mkbrr /Upload-Assistant/bin/MI; \
+    \
+    # Ensure UA can write its state under /Upload-Assistant/data (cookies/templates/etc)
+    chown -R 1000:1000 /Upload-Assistant/data; \
+    \
+    # Create the runtime user/group (best-effort, but keep build deterministic)
+    if ! getent group 1000 >/dev/null; then groupadd -g 1000 ua; fi; \
+    if ! getent passwd 1000 >/dev/null; then useradd -u 1000 -g 1000 -m -s /usr/sbin/nologin ua; fi
 ENV TMPDIR=/Upload-Assistant/tmp
+USER 1000:1000
 
 # Add environment variable to enable/disable Web UI
 ENV ENABLE_WEB_UI=false
-
-# Make entrypoint script executable
-RUN chmod +x docker-entrypoint.sh
 
 # Set the entry point for the container
 ENTRYPOINT ["/Upload-Assistant/docker-entrypoint.sh"]

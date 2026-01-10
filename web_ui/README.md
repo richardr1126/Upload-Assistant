@@ -26,6 +26,8 @@ If you use the `-webui` Docker image / Dockerfile that installs Flask, you do **
 2. Set `ENABLE_WEB_UI=true`.
 3. Configure **browse roots** (required): set `UA_BROWSE_ROOTS` to a comma-separated list of directories inside the container that you want the UI to be able to browse and execute against.
 
+Note: the Docker image runs as non-root by default (UID:GID `1000:1000`). For best compatibility, keep the default user and make your bind mounts writable by `1000:1000`.
+
 Example (compose-style env vars):
 
 ```yaml
@@ -43,6 +45,8 @@ environment:
 
 Make sure your volume mounts align with `UA_BROWSE_ROOTS`.
 For example, if you mount your torrent directory as `/data/torrents`, include `/data/torrents` in `UA_BROWSE_ROOTS`.
+
+If you override the container user away from `1000:1000` (via `docker run --user` or compose `user:`), you may hit permission errors with bundled binaries that are intentionally `0700` (owner-only). Prefer fixing host directory ownership instead.
 
 ## Quick start (local / bare metal)
 
